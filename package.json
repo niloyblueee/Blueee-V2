@@ -1,0 +1,11 @@
+{
+  "name": "blueee-v2",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "concurrently -k -n FRONTEND,EXPRESS,FLASK \"npm --prefix frontend run dev\" \"npm --prefix backend/express run dev\" \"powershell -Command \"cd backend/flask; if (Test-Path .venv\\Scripts\\python.exe) { .venv\\Scripts\\python.exe app.py } else { python app.py }\"\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

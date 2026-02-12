@@ -1,0 +1,11 @@
+flask==3.0.3
+python-dotenv==1.0.1
+psutil==6.0.0
+pycaw==20240210
+comtypes==1.4.6
+google-genai==0.5.0
+google-auth-oauthlib==1.2.1
+google-api-python-client==2.141.0
+PyPDF2==3.0.1
+SpeechRecognition==3.10.4
+pyttsx3==2.90
