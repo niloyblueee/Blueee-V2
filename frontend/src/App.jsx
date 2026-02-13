@@ -1,14 +1,49 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import PulseWave from "./components/PulseWave";
 import ResearchCanvas from "./components/ResearchCanvas";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:3001";
+const HISTORY_STORAGE_KEY = "blueee.chat.history.v1";
+const HISTORY_LIMIT = 24;
+
+function normalizeHistory(items) {
+  if (!Array.isArray(items)) {
+    return [];
+  }
+  return items
+    .map((item) => ({
+      role: item?.role === "assistant" ? "assistant" : "user",
+      text: String(item?.text || "").trim()
+    }))
+    .filter((item) => item.text)
+    .slice(-HISTORY_LIMIT);
+}
+
+function readHistoryFromSessionStorage() {
+  try {
+    const raw = window.sessionStorage.getItem(HISTORY_STORAGE_KEY);
+    if (!raw) {
+      return [];
+    }
+    return normalizeHistory(JSON.parse(raw));
+  } catch {
+    return [];
+  }
+}
 
 function useSpeechRecognition({ onFinal, onStatus }) {
   const recognitionRef = useRef(null);
   const [listening, setListening] = useState(false);
   const [transcript, setTranscript] = useState("");
   const finalTranscriptRef = useRef("");
+  const sentChunksRef = useRef(0);
+  const onFinalRef = useRef(onFinal);
+  const onStatusRef = useRef(onStatus);
+
+  useEffect(() => {
+    onFinalRef.current = onFinal;
+    onStatusRef.current = onStatus;
+  }, [onFinal, onStatus]);
 
   useEffect(() => {
     const SpeechRecognition =
@@ -28,8 +63,11 @@ function useSpeechRecognition({ onFinal, onStatus }) {
         const result = event.results[i];
         const text = result[0]?.transcript || "";
         if (result.isFinal && text.trim()) {
-          finalTranscriptRef.current = `${finalTranscriptRef.current} ${text}`.trim();
-          onFinal(text.trim());
+          const clean = text.trim();
+          finalTranscriptRef.current = `${finalTranscriptRef.current} ${clean}`.trim();
+          console.log("[Speech] Final chunk:", clean);
+          sentChunksRef.current += 1;
+          onFinalRef.current?.(clean);
         } else {
           interim = `${interim} ${text}`.trim();
         }
@@ -41,27 +79,70 @@ function useSpeechRecognition({ onFinal, onStatus }) {
     recognition.onstart = () => {
       setListening(true);
       finalTranscriptRef.current = "";
+      sentChunksRef.current = 0;
       setTranscript("");
-      onStatus?.("Listening...");
+      console.log("[Speech] Started listening");
+      onStatusRef.current?.("Listening...");
     };
     recognition.onend = () => {
       setListening(false);
-      setTranscript(finalTranscriptRef.current);
-      onStatus?.("Stopped listening.");
+      const finalText = finalTranscriptRef.current.trim();
+      setTranscript(finalText);
+      console.log("[Speech] Stopped. Final text:", finalText, "Chunks sent:", sentChunksRef.current);
+      
+      // Fallback: if no chunks were sent during listening, send full text now
+      if (finalText && sentChunksRef.current === 0) {
+        console.log("[Speech] Fallback send on stop");
+        onFinalRef.current?.(finalText);
+      }
+      
+      finalTranscriptRef.current = "";
+      sentChunksRef.current = 0;
+      onStatusRef.current?.("Stopped listening.");
     };
-    recognition.onerror = () => {
+    recognition.onerror = (event) => {
+      console.error("[Speech] Error:", event.error);
       setListening(false);
-      onStatus?.("Speech recognition error.");
+      onStatusRef.current?.("Speech recognition error.");
     };
 
     recognitionRef.current = recognition;
-  }, [onFinal, onStatus]);
+
+    return () => {
+      try {
+        recognition.stop();
+      } catch {
+        // no-op
+      }
+      recognitionRef.current = null;
+    };
+  }, []);
 
   return {
     listening,
     transcript,
-    start: () => recognitionRef.current?.start(),
-    stop: () => recognitionRef.current?.stop()
+    start: () => {
+      const recognition = recognitionRef.current;
+      if (!recognition || listening) {
+        return;
+      }
+      try {
+        recognition.start();
+      } catch {
+        // no-op
+      }
+    },
+    stop: () => {
+      const recognition = recognitionRef.current;
+      if (!recognition || !listening) {
+        return;
+      }
+      try {
+        recognition.stop();
+      } catch {
+        // no-op
+      }
+    }
   };
 }
 
@@ -69,34 +150,75 @@ export default function App() {
   const [thinking, setThinking] = useState(false);
   const [canvasContent, setCanvasContent] = useState("");
   const [status, setStatus] = useState("Ready.");
-  const [history, setHistory] = useState([]);
+  const [history, setHistory] = useState(() => readHistoryFromSessionStorage());
   const [lastHeard, setLastHeard] = useState("");
+  const historyRef = useRef(history);
+  const pendingRequestsRef = useRef(0);
 
-  const handleFinal = async (text) => {
-    setLastHeard(text);
-    setThinking(true);
+  useEffect(() => {
+    historyRef.current = history;
+  }, [history]);
+
+  const appendHistory = useCallback((role, text) => {
+    const cleanText = String(text || "").trim();
+    if (!cleanText) {
+      return;
+    }
+    const next = normalizeHistory([...historyRef.current, { role, text: cleanText }]);
+    historyRef.current = next;
+    setHistory(next);
+  }, []);
+
+  const setThinkingByPending = useCallback(() => {
+    setThinking(pendingRequestsRef.current > 0);
+  }, []);
+
+  useEffect(() => {
+    window.sessionStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(history));
+  }, [history]);
+
+  const handleFinal = useCallback(async (text) => {
+    console.log("[handleFinal] Called with:", text);
+    const cleanText = String(text || "").trim();
+    if (!cleanText) {
+      console.log("[handleFinal] Empty text, skipping");
+      return;
+    }
+
+    console.log("[handleFinal] Processing:", cleanText);
+    setLastHeard(cleanText);
+    pendingRequestsRef.current += 1;
+    setThinkingByPending();
     setStatus("Blueee is thinking...");
-    setHistory((prev) => [{ role: "user", text }, ...prev].slice(0, 6));
+
+    appendHistory("user", cleanText);
+    const nextHistory = historyRef.current;
+    console.log("[handleFinal] Sending request with history length:", nextHistory.length);
 
     try {
       const response = await fetch(`${API_BASE}/api/voice`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ text })
+        body: JSON.stringify({
+          text: cleanText,
+          history: nextHistory
+        })
       });
+      console.log("[handleFinal] Response status:", response.status);
       const payload = await response.json();
+      console.log("[handleFinal] Response payload:", payload);
 
       if (payload?.response?.summary) {
         setCanvasContent(payload.response.summary);
       }
 
       if (payload?.response?.text) {
-        setHistory((prev) => [{ role: "assistant", text: payload.response.text }, ...prev].slice(0, 6));
+        appendHistory("assistant", payload.response.text);
       }
 
       if (payload?.reply) {
-        setHistory((prev) => [{ role: "assistant", text: payload.reply }, ...prev].slice(0, 6));
+        appendHistory("assistant", payload.reply);
       }
 
       if (payload?.response?.action === "play_video" && payload?.response?.url) {
@@ -104,19 +226,25 @@ export default function App() {
       }
 
       setStatus("Standing by.");
+      console.log("[handleFinal] Request completed successfully");
     } catch (error) {
+      console.error("[handleFinal] Error:", error);
       setStatus("Something went wrong. Check the backend.");
     } finally {
-      setThinking(false);
+      pendingRequestsRef.current = Math.max(0, pendingRequestsRef.current - 1);
+      setThinkingByPending();
     }
-  };
+  }, [appendHistory, setThinkingByPending]);
 
   const speechAvailable = useMemo(() => {
     return Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
   }, []);
 
   const { listening, transcript, start, stop } = useSpeechRecognition({
-    onFinal: handleFinal,
+    onFinal: (text) => {
+      console.log("[useSpeechRecognition] onFinal fired with:", text);
+      handleFinal(text);
+    },
     onStatus: setStatus
   });
 
@@ -220,7 +348,7 @@ export default function App() {
               {history.length === 0 && (
                 <p className="text-sm text-slate-400">No commands yet.</p>
               )}
-              {history.map((item, index) => (
+              {history.slice().reverse().map((item, index) => (
                 <div
                   key={`${item.role}-${index}`}
                   className="rounded-2xl border border-white/5 bg-obsidian/70 p-3"

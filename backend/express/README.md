@@ -13,10 +13,18 @@
    npm run dev
    ```
 
+## Real-time Features
+
+Weather, time, and real-time queries are handled via:
+- **Google Search Grounding** - Gemini uses Google Search to fetch current weather, news, etc.
+- **Pattern-based time** - Local system time queries
+
+No additional API keys needed beyond `GEMINI_API_KEY`.
+
 ## Endpoints
 
 - `GET /health`
-- `POST /api/voice`
+- `POST /api/voice` - Main voice assistant endpoint (handles weather, time, quick replies, thinking mode)
 - `GET /api/session`
 - `POST /api/session`
 - `GET /api/oauth/google/url`

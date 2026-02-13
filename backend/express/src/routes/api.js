@@ -12,12 +12,35 @@ const { addHistory, ensureHistory } = require("../services/sessionMemory");
 
 const router = express.Router();
 
+function normalizeIncomingHistory(history, maxItems = 24) {
+  if (!Array.isArray(history)) {
+    return [];
+  }
+  return history
+    .map((item) => ({
+      role: item?.role === "assistant" ? "assistant" : "user",
+      text: String(item?.text || "").trim(),
+      ts: Date.now()
+    }))
+    .filter((item) => item.text)
+    .slice(-maxItems);
+}
+
 router.post("/voice", async (req, res) => {
   try {
     const userText = String(req.body?.text || "");
     const intent = String(req.body?.intent || "");
+
     ensureHistory(req.session);
-    addHistory(req.session, "user", userText);
+    const incomingHistory = normalizeIncomingHistory(req.body?.history);
+    if (incomingHistory.length) {
+      req.session.history = incomingHistory;
+    }
+
+    const lastMessage = req.session.history[req.session.history.length - 1];
+    if (userText && (!lastMessage || lastMessage.role !== "user" || lastMessage.text !== userText)) {
+      addHistory(req.session, "user", userText);
+    }
 
     if (intent === "clock" || /\b(time|clock|what\s+time)\b/i.test(userText)) {
       const wit = getPatternTimeWit();
@@ -59,7 +82,8 @@ router.post("/voice", async (req, res) => {
 router.get("/session", (req, res) => {
   res.json({
     name: req.session.userName || null,
-    agency: req.session.userAgency || null
+    agency: req.session.userAgency || null,
+    history: Array.isArray(req.session.history) ? req.session.history : []
   });
 });
 

@@ -8,7 +8,7 @@ async function forwardToFlask(payload, session) {
     session: {
       name: session.userName || null,
       agency: session.userAgency || null,
-      history: Array.isArray(session.history) ? session.history.slice(-6) : []
+      history: Array.isArray(session.history) ? session.history.slice(-20) : []
     }
   });
   return response.data;

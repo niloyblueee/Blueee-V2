@@ -11,7 +11,13 @@
    pip install -r requirements.txt
    ```
    Keep the terminal activated in `.venv` whenever you run or test this Flask service.
-3. Run the server:
+
+3. **Set up Google OAuth** (for Gmail, Docs, Calendar, etc.)
+   - See **[OAUTH_SETUP.md](OAUTH_SETUP.md)** for complete instructions
+   - Quick: Download OAuth credentials from Google Cloud Console
+   - Save as `backend/flask/client_secret.json`
+
+4. Run the server:
    ```bash
    python app.py
    ```

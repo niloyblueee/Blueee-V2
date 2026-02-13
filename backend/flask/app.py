@@ -63,18 +63,40 @@ ALLOWED_HOSTS = {"127.0.0.1", "::1"}
 DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("gemini_api_key")
 
-GOOGLE_OAUTH_CLIENT_SECRET = os.getenv(
-    "GOOGLE_OAUTH_CLIENT_SECRET",
-    os.path.join(os.path.dirname(__file__), "client_secret.json")
-)
-GOOGLE_TOKEN_PATH = os.getenv(
-    "GOOGLE_TOKEN_PATH",
-    os.path.join(os.path.dirname(__file__), "tokens.json")
-)
+# Get workspace root (parent of backend folder)
+WORKSPACE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+# Get OAuth client secret path and resolve it relative to workspace root
+oauth_path = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "backend/flask/client_secret.json")
+if not os.path.isabs(oauth_path):
+    # If relative path, resolve from workspace root
+    GOOGLE_OAUTH_CLIENT_SECRET = os.path.join(WORKSPACE_ROOT, oauth_path)
+else:
+    GOOGLE_OAUTH_CLIENT_SECRET = oauth_path
+
+print(f"[flask] Workspace root: {WORKSPACE_ROOT}")
+print(f"[flask] Looking for OAuth client secret at: {GOOGLE_OAUTH_CLIENT_SECRET}")
+print(f"[flask] OAuth file exists: {os.path.exists(GOOGLE_OAUTH_CLIENT_SECRET)}")
+
+# Get token path and resolve it relative to workspace root
+token_path = os.getenv("GOOGLE_TOKEN_PATH", "backend/flask/tokens.json")
+if not os.path.isabs(token_path):
+    # If relative path, resolve from workspace root
+    GOOGLE_TOKEN_PATH = os.path.join(WORKSPACE_ROOT, token_path)
+else:
+    GOOGLE_TOKEN_PATH = token_path
 
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/drive",
-    "https://www.googleapis.com/auth/documents"
+    "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/tasks",
+    "https://www.googleapis.com/auth/forms.body",
+    "https://www.googleapis.com/auth/youtube.readonly"
 ]
 
 APP_COMMANDS = {
@@ -170,7 +192,10 @@ def build_drive_clients():
     if not GOOGLE_API_AVAILABLE:
         raise RuntimeError("Google API client libraries not installed")
     if not os.path.exists(GOOGLE_OAUTH_CLIENT_SECRET):
-        raise RuntimeError("Missing Google OAuth client secret file")
+        raise RuntimeError(
+            f"Missing Google OAuth client secret file at: {GOOGLE_OAUTH_CLIENT_SECRET}. "
+            f"Download from Google Cloud Console and save as backend/flask/client_secret.json"
+        )
 
     creds = None
     if os.path.exists(GOOGLE_TOKEN_PATH):
@@ -239,6 +264,61 @@ def create_google_doc(title, content):
         }
     ).execute()
     return doc_id
+
+
+def check_gmail(max_results=5):
+    """Check recent Gmail messages"""
+    if not GOOGLE_API_AVAILABLE:
+        raise RuntimeError("Google API client libraries not installed")
+    if not os.path.exists(GOOGLE_OAUTH_CLIENT_SECRET):
+        raise RuntimeError(
+            f"Missing Google OAuth client secret file at: {GOOGLE_OAUTH_CLIENT_SECRET}. "
+            f"Download from Google Cloud Console and save as backend/flask/client_secret.json"
+        )
+
+    creds = None
+    if os.path.exists(GOOGLE_TOKEN_PATH):
+        creds = Credentials.from_authorized_user_file(GOOGLE_TOKEN_PATH, GOOGLE_SCOPES)
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                GOOGLE_OAUTH_CLIENT_SECRET,
+                GOOGLE_SCOPES
+            )
+            creds = flow.run_local_server(port=0)
+        with open(GOOGLE_TOKEN_PATH, "w", encoding="utf-8") as handle:
+            handle.write(creds.to_json())
+
+    gmail = build("gmail", "v1", credentials=creds)
+    
+    results = gmail.users().messages().list(
+        userId="me",
+        maxResults=max_results,
+        labelIds=["INBOX"]
+    ).execute()
+    
+    messages = results.get("messages", [])
+    if not messages:
+        return {"emails": [], "summary": "No recent emails found."}
+    
+    emails = []
+    for msg in messages:
+        message = gmail.users().messages().get(userId="me", id=msg["id"], format="metadata").execute()
+        headers = message.get("payload", {}).get("headers", [])
+        
+        subject = next((h["value"] for h in headers if h["name"].lower() == "subject"), "No Subject")
+        sender = next((h["value"] for h in headers if h["name"].lower() == "from"), "Unknown")
+        
+        emails.append({
+            "id": msg["id"],
+            "subject": subject,
+            "from": sender
+        })
+    
+    return {"emails": emails, "count": len(emails)}
 
 
 def open_app(name):
@@ -328,6 +408,36 @@ def generate_traffic_summary(origin, destination):
     return response.text
 
 
+def _normalize_history(history, limit=20):
+    if not isinstance(history, list):
+        return []
+    normalized = []
+    for item in history:
+        role = "assistant" if str(item.get("role", "")).lower() == "assistant" else "user"
+        text = str(item.get("text", "")).strip()
+        if text:
+            normalized.append({"role": role, "text": text})
+    return normalized[-limit:]
+
+
+def build_contextual_prompt(text, session_payload):
+    history = _normalize_history((session_payload or {}).get("history", []))
+    if not history:
+        return text
+
+    lines = []
+    for item in history:
+        label = "Assistant" if item["role"] == "assistant" else "User"
+        lines.append(f"{label}: {item['text']}")
+
+    return (
+        "You are Blueee V2, a desktop voice assistant. "
+        "Use conversation history to answer follow-up questions consistently.\n\n"
+        f"Conversation so far:\n{'\n'.join(lines)}\n\n"
+        f"Current user message: {text}"
+    )
+
+
 @app.before_request
 def restrict_localhost():
     result = ensure_localhost()
@@ -341,6 +451,7 @@ def ai_router():
     payload = request.get_json(silent=True) or {}
     action = payload.get("action")
     params = payload.get("params", {})
+    session_payload = payload.get("session", {})
 
     try:
         if action == "open_app":
@@ -353,6 +464,16 @@ def ai_router():
             return jsonify(mute_volume(True))
         if action == "unmute":
             return jsonify(mute_volume(False))
+        if action == "check_gmail":
+            gmail_data = check_gmail(params.get("max_results", 5))
+            if not gmail_data.get("emails"):
+                return jsonify({"summary": "Your inbox is empty or no new messages."})
+            summary_lines = [f"{i+1}. From: {email['from']} - Subject: {email['subject']}" 
+                           for i, email in enumerate(gmail_data["emails"])]
+            return jsonify({
+                "summary": f"You have {gmail_data['count']} recent emails:\n" + "\n".join(summary_lines),
+                "emails": gmail_data["emails"]
+            })
         if action == "summarize_pdf":
             summary = summarize_pdf(
                 params.get("path", ""),
@@ -370,10 +491,53 @@ def ai_router():
 
         text = payload.get("text")
         if text:
+            text_lower = str(text).lower()
+            
+            # Auto-detect Gmail intent
+            if any(kw in text_lower for kw in ["gmail", "email", "inbox", "check mail", "check email"]):
+                try:
+                    gmail_data = check_gmail(5)
+                    if not gmail_data.get("emails"):
+                        return jsonify({"text": "Your inbox is empty or no new messages found."})
+                    
+                    summary_lines = [
+                        f"{i+1}. From: {email['from']} - Subject: {email['subject']}" 
+                        for i, email in enumerate(gmail_data["emails"])
+                    ]
+                    return jsonify({
+                        "text": f"You have {gmail_data['count']} recent emails:\n" + "\n".join(summary_lines),
+                        "summary": "\n".join(summary_lines)
+                    })
+                except Exception as e:
+                    return jsonify({"text": f"Couldn't check Gmail: {str(e)}. Make sure OAuth is set up."})
+            
+            # Auto-detect Google Docs creation intent
+            if any(kw in text_lower for kw in ["create doc", "make doc", "save to doc", "google doc"]):
+                # Extract content from history or current text
+                doc_title = f"Blueee Note {datetime.now().strftime('%Y-%m-%d %H-%M')}"
+                doc_content = text
+                
+                # Try to get more context from history
+                history = _normalize_history((session_payload or {}).get("history", []))
+                if history and len(history) > 1:
+                    recent_texts = [h["text"] for h in history[-5:]]
+                    doc_content = "\n\n".join(recent_texts)
+                
+                try:
+                    doc_id = create_google_doc(doc_title, doc_content)
+                    return jsonify({
+                        "text": f"Created Google Doc '{doc_title}' successfully! Document ID: {doc_id}",
+                        "doc_id": doc_id
+                    })
+                except Exception as e:
+                    return jsonify({"text": f"Couldn't create document: {str(e)}. Make sure OAuth is set up."})
+            
+            # Default: use Gemini with context
             client = get_genai_client()
+            prompt = build_contextual_prompt(str(text), session_payload)
             response = client.models.generate_content(
                 model=DEFAULT_MODEL,
-                contents=[text]
+                contents=[prompt]
             )
             return jsonify({"text": response.text})
 
