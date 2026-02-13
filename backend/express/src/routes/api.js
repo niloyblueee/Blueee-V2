@@ -57,11 +57,20 @@ router.post("/voice", async (req, res) => {
       const flaskResponse = await forwardToFlask(req.body, req.session);
       const assistantText = flaskResponse?.text || flaskResponse?.summary || "";
       addHistory(req.session, "assistant", String(assistantText));
-      return res.json({
+      
+      // Pass through video action from Flask
+      const result = {
         mode: "thinking",
         source: "flask",
         response: flaskResponse
-      });
+      };
+      
+      if (flaskResponse?.response?.action === "play_video" && flaskResponse?.response?.url) {
+        result.response.action = "play_video";
+        result.response.url = flaskResponse.response.url;
+      }
+      
+      return res.json(result);
     }
 
     const quickReply = await getQuickReply(req.body, req.session);

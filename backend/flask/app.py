@@ -241,6 +241,55 @@ def summarize_pdf(file_path, summary_prompt=None):
     return response.text
 
 
+def search_youtube(query, max_results=1):
+    """Search YouTube and return video details."""
+    if not GOOGLE_API_AVAILABLE:
+        raise RuntimeError("Google API libraries not installed")
+    if not os.path.exists(GOOGLE_OAUTH_CLIENT_SECRET):
+        raise FileNotFoundError(f"Missing Google OAuth client secret file at {GOOGLE_OAUTH_CLIENT_SECRET}")
+    
+    # Authenticate and get credentials
+    creds = None
+    if os.path.exists(GOOGLE_TOKEN_PATH):
+        creds = Credentials.from_authorized_user_file(GOOGLE_TOKEN_PATH, GOOGLE_SCOPES)
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                GOOGLE_OAUTH_CLIENT_SECRET,
+                GOOGLE_SCOPES
+            )
+            creds = flow.run_local_server(port=0)
+        with open(GOOGLE_TOKEN_PATH, "w", encoding="utf-8") as handle:
+            handle.write(creds.to_json())
+
+    youtube = build("youtube", "v3", credentials=creds)
+    
+    # Search for videos
+    search_response = youtube.search().list(
+        q=query,
+        part="id,snippet",
+        maxResults=max_results,
+        type="video"
+    ).execute()
+    
+    videos = []
+    for item in search_response.get("items", []):
+        video_id = item["id"]["videoId"]
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+        videos.append({
+            "id": video_id,
+            "title": item["snippet"]["title"],
+            "url": video_url,
+            "channel": item["snippet"]["channelTitle"],
+            "description": item["snippet"]["description"]
+        })
+    
+    return videos
+
+
 def create_google_doc(title, content):
     drive, docs = build_drive_clients()
     file_metadata = {
@@ -484,6 +533,18 @@ def ai_router():
             title = params.get("title") or f"Blueee Research {datetime.now().strftime('%Y-%m-%d %H-%M-%S')}"
             doc_id = create_google_doc(title, params.get("content", ""))
             return jsonify({"doc_id": doc_id})
+        if action == "search_youtube":
+            videos = search_youtube(params.get("query", ""), params.get("max_results", 1))
+            if videos:
+                return jsonify({
+                    "text": f"Found '{videos[0]['title']}' by {videos[0]['channel']}",
+                    "response": {
+                        "action": "play_video",
+                        "url": videos[0]["url"]
+                    },
+                    "videos": videos
+                })
+            return jsonify({"text": "No videos found"})
         if action == "speak":
             if not TTS_AVAILABLE:
                 return jsonify({"ok": False, "message": "TTS not available"}), 500
@@ -531,6 +592,35 @@ def ai_router():
                     })
                 except Exception as e:
                     return jsonify({"text": f"Couldn't create document: {str(e)}. Make sure OAuth is set up."})
+            
+            # Auto-detect YouTube search intent
+            if any(kw in text_lower for kw in ["youtube", "play video", "find video", "search video", "show me video", "watch video"]):
+                # Extract search query from the text
+                search_query = text
+                # Remove common trigger words to get cleaner query
+                for trigger in ["youtube", "play video", "find video", "search video", "show me video", "watch video", "play", "find", "search", "show me", "watch", "on youtube"]:
+                    search_query = search_query.replace(trigger, "")
+                search_query = search_query.strip()
+                
+                if not search_query:
+                    return jsonify({"text": "What would you like me to search for on YouTube?"})
+                
+                try:
+                    videos = search_youtube(search_query, max_results=1)
+                    if not videos:
+                        return jsonify({"text": f"No YouTube videos found for '{search_query}'"})
+                    
+                    video = videos[0]
+                    return jsonify({
+                        "text": f"Opening '{video['title']}' by {video['channel']}",
+                        "response": {
+                            "action": "play_video",
+                            "url": video["url"]
+                        },
+                        "video": video
+                    })
+                except Exception as e:
+                    return jsonify({"text": f"Couldn't search YouTube: {str(e)}. Make sure OAuth is set up."})
             
             # Default: use Gemini with context
             client = get_genai_client()

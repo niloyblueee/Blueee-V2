@@ -16,7 +16,12 @@ const COMPLEX_HINTS = [
   "check my mail",
   "google doc",
   "create doc",
-  "save to docs"
+  "save to docs",
+  "youtube",
+  "video",
+  "play video",
+  "find video",
+  "search video"
 ];
 
 function voiceIntelligence(req, res, next) {
@@ -31,8 +36,8 @@ function voiceIntelligence(req, res, next) {
 
   const lower = `${text} ${hint}`.toLowerCase();
   
-  // Route Gmail and Docs to Flask (has OAuth)
-  if (/\b(gmail|email|inbox|check.*(mail|email)|google doc|create doc|save.*doc)\b/i.test(lower)) {
+  // Route Gmail, Docs, and YouTube to Flask (has OAuth)
+  if (/\b(gmail|email|inbox|check.*(mail|email)|google doc|create doc|save.*doc|youtube|video|play.*video|find.*video|search.*video)\b/i.test(lower)) {
     req.voiceRoute = "think";
     return next();
   }
